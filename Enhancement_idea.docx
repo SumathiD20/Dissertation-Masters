@@ -1,0 +1,17 @@
+Noise-injection & obfuscation of door-opening patterns
+What you have
+
+Isolation Forest flags every “dip” as an anomaly.
+
+In stream_processor.py you inject large noise (±0.1 °C) whenever a dip occurs, and small noise (±0.02 °C) otherwise.
+
+The subscriber only ever sees the fuzzed values, so the door-opening spikes vanish but the rest of the trace remains visible.
+
+✅ Objective met: identifiable thermal patterns are hidden, while normal readings still flow for “operational” use.
+
+Potential enhancements
+
+Tune your noise magnitude via experiments so that HVAC algorithms (or your PID simulator) still hit set-points within tolerance.
+
+Consider interpolation or splines over multi‐second windows instead of pure random noise for even smoother masking.
+
