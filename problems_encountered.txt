@@ -1,0 +1,145 @@
+Environment Preparation
+Local Laptop
+
+Created project folder, initialized Git, set up a Python 3 virtual environment.
+
+Installed required libraries: pandas, numpy, scikit-learn, cryptography, paho-mqtt, joblib, psutil.
+
+Cloud VM (Ubuntu t2.micro)
+
+Launched free-tier instance, opened port 1883 in its security group.
+
+Installed mosquitto and python3-pip, then pip3 install pandas scikit-learn joblib numpy cryptography paho-mqtt psutil.
+
+No issues here—standard setup.
+
+2. Key Management
+Generated a symmetric Fernet key via generate_key.py.
+
+Locked the file down (chmod 600 secret.key).
+
+Copied secret.key to the VM via scp.
+
+Issue: Forgot to secure key file permissions on VM → fixed with chmod 600.
+
+3. Publisher: Encrypt Before MQTT
+Wrote publisher.py to read temp_reading.csv, encrypt each JSON payload with Fernet, then publish.single(...) to topic dc/temperature/raw_encrypted.
+
+Added client.username_pw_set(...) for MQTT authentication after locking down the broker.
+
+Verified that mosquitto_sub on VM showed encrypted blobs.
+
+No major issues; authentication added after broker was secured.
+
+4. MQTT Broker Configuration
+Installed Mosquitto on the VM.
+
+Edited /etc/mosquitto/mosquitto.conf to:
+
+conf
+Copy
+Edit
+listener 1883
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+Created a password file via mosquitto_passwd -c /etc/mosquitto/passwd your_user.
+
+Restarted Mosquitto.
+
+Issue: Initial rc=5 (“Not authorized”) from clients → solved by adding username_pw_set in all clients.*
+
+5. Model Training
+Created train_model.py on the VM to load temp_reading.csv, skip comment lines (comment='#'), parse the timestamp column, train an IsolationForest on the first 10 s of data, and dump iforest.joblib.
+
+Ran with python3 train_model.py.
+
+Issue: Pandas couldn’t find a timestamp column because the CSV had # comments. We fixed it by adding comment='#' and names=[...] to read_csv.*
+
+6. Stream Processor: Decrypt → Detect → Mask → Encrypt
+Wrote stream_processor.py that:
+
+Subscribes to dc/temperature/raw_encrypted.
+
+Decrypts each message.
+
+Runs IsolationForest.predict to flag dips.
+
+Applies Gaussian noise (σ=0.02 for normal, σ=0.1 for dips), but bypasses masking for any temp ≥ 30 °C.
+
+Re-encrypts to dc/temperature/masked_encrypted.
+
+Added on_connect / on_message callbacks and client.loop_forever() to ensure the client stayed connected.
+
+Inserted debug prints at each stage to trace message flow.
+
+Issue: The processor never printed “Received message” → discovered we hadn’t called loop_forever(). Added it and confirmed messages via mosquitto_sub.*
+
+7. Subscriber / HVAC Simulator
+Created subscriber.py to:
+
+Subscribe to dc/temperature/masked_encrypted.
+
+Decrypt with the same secret.key.
+
+Print masked temperatures and alerts (“🚪 Door event”, “⚠️ OVERHEAT”, “🔒 Night opening”, “🚨 VERY STRANGE”).
+
+Added on_connect logging and wrapped cipher.decrypt(...) in try/except to catch key mismatches.
+
+Verified it connected (rc=0) but saw no messages → realized we were still subscribed to the raw_encrypted topic. Fixed the topic to masked_encrypted.
+
+Ran the subscriber on the VM directly to rule out Windows-to-VM network issues and confirmed it received and decrypted messages.
+
+8. Data Generation & Testing
+Generated a 350-row temp_reading_350.csv with:
+
+Small Gaussian baseline noise (σ=0.05).
+
+Five “door dip” events at indices [10, 45, 100, 200, 300].
+
+One overheat spike at index 150.
+
+Comments marking each anomaly.
+
+Used this file to replay data and manually verify that each step (publisher → processor → subscriber) handled anomalies correctly.
+
+9. Containerization & DevOps
+Dockerized each component:
+
+Wrote Dockerfiles for publisher, processor, subscriber.
+
+Created a shared requirements.txt.
+
+Local orchestration with docker-compose.yml (broker + 3 services).
+
+CI/CD with GitHub Actions to lint, test, build & push Docker images on each main-branch commit.
+
+Terraform scripts to provision the VM and deploy containers automatically.
+
+Issue: Managing multiple moving parts in GitHub Actions—solved by splitting into separate jobs for linting vs. Docker build, and by using docker/build-push-action.*
+
+10. Final End-to-End Verification
+Publisher: confirmed every second an encrypted message lands on raw_encrypted.
+
+Stream Processor: saw debug prints for decryption, anomaly flagging, masking decisions, and masked publication.
+
+Subscriber: printed decrypted, masked temperatures and correct alerts in real time.
+
+Manual tests:
+
+Door dips at 21:58–21:59 → “🚪 Door event” (no night flag).
+
+Door dips at 22:01 & 22:03 → “🔒 Night opening” and on the third off-hours dip → “🚨 VERY STRANGE.”
+
+Overheat at 09:02 → “⚠️ OVERHEAT ALARM” with real temp passed through.
+
+Summary of Issues & Fixes
+Issue	Fix
+Pandas couldn’t parse commented header in training script	Used comment='#' and names=[...] in read_csv
+Python alias missing on Ubuntu VM	Switched from python → python3
+Subscriber rc=5 “Not authorized”	Added username_pw_set(...) to all MQTT clients
+Stream processor never received messages	Added client.loop_forever() and on_connect callback
+Subscriber listening to wrong topic	Corrected subscribe topic to masked_encrypted
+Negative sleep in fake publisher	Simplified to time.sleep(1) per iteration
+GitHub Actions multi-step complexity	Broke into distinct jobs and used official Docker actions
+
+With this documented, you have a clear “as-built” record for your dissertation—every script, every bug, and every resolution, leading to a robust, secure, real-time pipeline.
